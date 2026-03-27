@@ -1,0 +1,275 @@
+#Ways to run this code:
+#python titanicTest.py 
+
+import pandas as pd
+import argparse
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from pathlib import Path
+import matplotlib.pyplot as plt
+from openpyxl.workbook import Workbook
+from openpyxl import load_workbook
+from sklearn.decomposition import PCA
+import seaborn as sns
+from sklearn.metrics import pairwise_distances
+import numpy as np
+from kneed import KneeLocator
+from scipy.cluster.hierarchy import linkage, dendrogram
+from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_samples
+
+#inspect the z-score scaled data for a given university and return the top n states
+def get_ranked_states_scaled(university_name, top_n):
+        if university_name not in scaled_df.index:
+            print(f"University '{university_name}' not found in the dataset.")
+            return None
+        # Get scaled state scores for the university
+        state_scores = scaled_df.loc[university_name]
+        ranked = state_scores.sort_values(ascending=False).head(top_n)
+        # Return a clean two-column DataFrame
+        return pd.DataFrame({
+            f"{university_name} State": ranked.index,
+            f"{university_name} Score": ranked.values
+        })
+
+#inspect the normalized data for a given university and return the top n states
+def get_ranked_states_normalized(university_name, top_n):
+        if university_name not in columns_percent.index:
+            print(f"University '{university_name}' not found in the dataset.")
+            return None
+        # Get normalized state scores for the university
+        state_scores = columns_percent.loc[university_name]
+        ranked = state_scores.sort_values(ascending=False).head(top_n)
+        # Return a clean two-column DataFrame
+        return pd.DataFrame({
+            f"{university_name} State": ranked.index,
+            f"{university_name} Percent": ranked.values
+        })
+
+#inspect the raw counts for a given university and return the top n states
+def get_ranked_states_counts(university_name, top_n):
+        if university_name not in columns.index:
+            print(f"University '{university_name}' not found in the dataset.")
+            return None
+        #Get raw state counts for the university
+        state_scores = columns.loc[university_name] 
+        ranked = state_scores.sort_values(ascending=False).head(top_n)
+        #Return a clean two-column DataFrame
+        return pd.DataFrame({
+            f"{university_name} State": ranked.index,
+            f"{university_name} Count": ranked.values
+        })
+
+
+
+#Parse command-line arguments
+parser = argparse.ArgumentParser(description="Running machine learning on a XLSX file to find clusters.")
+parser.add_argument("CSVfile", help="input your csv file") #Allows one or more files to be passed
+parser.add_argument("VariableName", nargs="+", help="Input the variable names")
+parser.add_argument("--output", help="Output XLSX file name with its clusters") #Sets up a default output name if not explicitly called
+parser.add_argument("--clusters", type=int, default=62, help="Number of clusters to use (default=3)")
+parser.add_argument("--UniNameFile", help="Input the file of the list of univerities to highlight on dendrogram")
+parser.add_argument("--hierarchical", action="store_true", help="compute hierarchical clustering")
+parser.add_argument("--pairwise", action="store_true", help="compute pair-wise function")
+parser.add_argument("--rank", type=str, nargs = "+", help="rank states for a given university (make sure to quote the name if there's spaces)")
+parser.add_argument("--silhouette", action="store_true", help="compute silhouette scores")
+parser.add_argument("--elbow", action="store_true", help="Run elbow method to help determine best cluster count")
+parser.add_argument("--c", type=int, default=62, help="Count of states in the ranking")
+parser.add_argument("--DropOhio", action="store_true", help="Drop Ohio column without normalizing the data")
+parser.add_argument("--NormAndDropOhio", action="store_true", help="Normalize the data and drop Ohio column")
+parser.add_argument("--linkage", type=str, default="ward", help="Linkage method for hierarchical clustering (ward, single, complete, average)")
+args = parser.parse_args() #Parse the arguments when used in the command line
+
+read_df = pd.read_csv(Path(args.CSVfile), encoding="latin1", index_col=0)
+#df = pd.get_dummies(read_df)  #perform one-hot encoding on categorical data (transforms strings into a binary set)
+
+read_df = read_df.fillna(0) #any missing information gets replaced with a 0
+
+
+columns = read_df[args.VariableName]
+if args.DropOhio: #Drop the column named "Ohio" if it exists
+    if "Ohio" in columns.columns:
+        columns = columns.drop(columns="Ohio")
+
+columns_percent = columns.div(columns.sum(axis=1), axis=0) #normalizes total size of each university by converting count to percent
+columns_percent = columns_percent.fillna(0)
+#Drop the column named "Ohio" if it exists
+if args.NormAndDropOhio:
+    if "Ohio" in columns_percent.columns:
+        columns_percent = columns_percent.drop(columns="Ohio")
+#Standardize the data (z-score scaling)
+scaler = StandardScaler()
+scaler.fit(columns_percent)
+columns_Scaled = scaler.transform(columns_percent)
+
+#Rebuild a DataFrame with university names and state columns
+scaled_df = pd.DataFrame(columns_Scaled, index=columns.index, columns=columns.columns)
+
+
+# Elbow method
+if args.elbow:
+    inertia = [] #also known as sum of square distances
+    rangeValues = range(1, 100)  #Try k = 1 through 10
+    #Fit KMeans for each cluster count and record inertia
+    for k in rangeValues:
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto")
+        #k represents the amount of clusters
+        #random state keeps randomness repeatable. 42 is just a “magic number” people use as a seed
+        #n-init will try 10 different starting points and pick the best one
+        kmeans.fit(columns_Scaled)
+        inertia.append(kmeans.inertia_)
+    #Use KneeLocator to find the "elbow" point in the inertia curve
+    knee = KneeLocator(rangeValues, inertia, curve="convex", direction="decreasing")
+
+    print("Optimal number of clusters (knee point):", knee.knee)
+
+    sns.set(style="whitegrid")
+    sns.lineplot(x=list(rangeValues), y=inertia, marker="o", color="blue")
+    plt.xlabel("Number of clusters (k)")
+    plt.ylabel("Inertia (Sum of square distances)")
+    plt.title("Elbow Method to Determine Optimal Clusters")
+    plt.show()
+
+elif args.rank: 
+
+    #Initialize a list to hold ranked DataFrames for each university
+    ranked_frames = []
+
+    #Loop through each university name provided in the command-line arguments
+    for name in args.rank:
+        #Get the ranked states for this university
+        first_df = get_ranked_states_scaled(name, args.c)
+        second_df = get_ranked_states_normalized(name, args.c)
+        third_df = get_ranked_states_counts(name, args.c)
+        #Merge the two DataFrames side-by-side
+        if first_df is not None and second_df is not None and third_df is not None:
+            merged_df = pd.concat([first_df, second_df, third_df], axis=1)
+            #Add this merged DataFrame to the list of ranked frames
+            ranked_frames.append(merged_df)
+
+    #Concatenate side-by-side
+    combined_df = pd.concat(ranked_frames, axis=1)
+    if args.output:
+        #Save to Excel
+        combined_df.to_excel(args.output, index=False, engine="openpyxl")
+    print(combined_df)
+    #python titanicTest.py VariableNames --rank "University A" "University B" "etc" --c 1-62
+    
+
+elif args.pairwise:
+    #Calculate pairwise distances between universities based on the scaled data
+    dist_matrix = pairwise_distances(columns_Scaled, metric="euclidean")
+    #Print the distance matrix as a DataFrame with university names as both row and column labels
+    dist_df = pd.DataFrame(dist_matrix, index=read_df.index, columns=read_df.index)
+    print(dist_df)
+    dist_df.to_excel(args.output, index=True, engine="openpyxl")
+
+elif args.hierarchical:
+    #Perform hierarchical clustering (Ward's method)
+    linked = linkage(columns_Scaled, method=args.linkage)
+
+    #Create figure
+    fig, ax = plt.subplots(figsize=(10, 7))
+    #Plot dendrogram
+    dendrogram(
+        linked,
+        labels=read_df.index.tolist(),      # sample labels
+        orientation='top',                  # grow top-down
+        distance_sort='descending',         # sort by distance
+        show_leaf_counts=True               # show sample count
+    )
+    
+    x_tick_labels = ax.get_xticklabels() #Get the x-axis tick labels
+
+    #highlight_universities = pd.read_csv(Path(args.UniNameFile), header=None)[0].values #Read the list of universities to highlight
+
+    #for label_obj in x_tick_labels: #For each label on the x-axis 
+        #if label_obj.get_text() in highlight_universities: #If the label is in the list of universities to highlight
+            #label_obj.set_color('red')
+            #label_obj.set_fontweight('bold') #Make it bolded red
+
+    #Bold "Xavier University" blue if it exists
+    for label_obj in x_tick_labels:
+        if label_obj.get_text() == "Xavier University":
+            label_obj.set_color('red')
+            label_obj.set_fontweight('bold')
+
+
+    #Define what happens when you click
+    def on_click(event):
+        #Check if the click was on an x-axis label
+        for label_obj in x_tick_labels:
+            if label_obj.contains(event)[0]:
+                #Capture the name of the university and print all the z-score scaled, normalized, and raw counts for the top states for that university
+                clicked_name = label_obj.get_text()
+                print(f"You clicked on: {clicked_name}")
+                first_df = get_ranked_states_scaled(clicked_name, top_n=20)
+                second_df = get_ranked_states_normalized(clicked_name, top_n=20)
+                third_df = get_ranked_states_counts(clicked_name, top_n=20)
+                if first_df is not None and second_df is not None and third_df is not None:
+                    ranked_df = pd.concat([first_df, second_df, third_df], axis=1)
+                    print(ranked_df.to_string(index=False))
+
+    #Connect the click event
+    fig.canvas.mpl_connect('button_press_event', on_click)
+
+    plt.style.use('bmh')
+    # Title and axis labels
+    plt.title('Hierarchical Clustering Dendrogram (' + args.linkage + " linkage)", fontsize=24)
+    plt.xlabel('University', fontsize=18)
+    plt.ylabel('Distance', fontsize=18)
+
+    # Make university names smaller and angled
+    plt.xticks(fontsize=8, rotation=90)  # Smaller font, vertical orientation
+    plt.yticks(fontsize=12)
+
+    plt.tight_layout()  # Prevent label cutoff
+    plt.show()
+    #python titanicTest.py 4YearUniversities.csv Alabama Alaska American_Samoa Arizona Arkansas California Colorado 
+    # Connecticut Delaware District_of_Columbia Federated_States_of_Micronesia Florida Foreign_countries Georgia Guam Hawaii Idaho Illinois 
+    # Indiana Iowa Kansas Kentucky Louisiana Maine Marshall_Islands Maryland Massachusetts Michigan Minnesota Mississippi Missouri Montana Nebraska 
+    # Nevada New_Hampshire New_Jersey New_Mexico New_York North_Carolina North_Dakota Northern_Marianas Oklahoma Oregon Ohio Palau Pennsylvania 
+    # Puerto_Rico Residence_not_reported Rhode_Island South_Carolina South_Dakota State_unknown Tennessee Texas Utah Vermont Virgin_Islands Virginia Washington West_Virginia Wisconsin Wyoming --hierarchical       
+    
+elif args.silhouette:
+    scores = []
+    rangeValues = range(2, 100)  #Try k = 2 through 100
+    for k in rangeValues: #for each cluster count
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10) #Fit KMeans
+        labels = kmeans.fit_predict(columns_Scaled) #predict clusters for each point
+        #Calculate silhouette score for Xavier University
+        sample_score = silhouette_samples(columns_Scaled, kmeans.labels_)
+        xavier_index = read_df.index.get_loc("Xavier University")
+        xavier_score = sample_score[xavier_index]
+        scores.append(xavier_score)
+    
+    plt.plot(rangeValues, scores, marker='o')
+    plt.title('Xavier Silhouette Scores')
+    plt.xlabel('Number of clusters (k)')
+    plt.ylabel('Silhouette Score')
+    plt.grid(True)
+    plt.show()
+
+else:
+    # Run KMeans with chosen cluster count
+    kmeans = KMeans(n_clusters=args.clusters, random_state=42, n_init=10)
+    read_df["Cluster"] = kmeans.fit_predict(columns_Scaled)
+
+    score = silhouette_score(columns_Scaled, kmeans.labels_)
+    print(f"Silhouette Score: {score:.3f}")
+
+    sample_score = silhouette_samples(columns_Scaled, kmeans.labels_)
+    xavier_index = read_df.index.get_loc("Xavier University")
+    xavier_score = sample_score[xavier_index]
+    print(f"Xavier University's Silhouette Score: {xavier_score:.3f}") #Print silhouette score for Xavier University if it exists (3 decimal place
+
+
+
+
+    #Print summary
+    val_df = read_df["Cluster"].value_counts()
+    print(val_df.to_string())
+
+    
+    # Save output
+    read_df.to_excel(args.output, index=True, engine="openpyxl")
